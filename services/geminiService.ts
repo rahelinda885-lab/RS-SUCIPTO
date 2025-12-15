@@ -4,49 +4,48 @@ import { AgentType } from "../types";
 
 // Helper to get API key safely
 const getApiKey = (): string => {
-  if (typeof process !== 'undefined' && process.env.API_KEY) {
-    return process.env.API_KEY;
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    throw new Error("API Key is missing. Please set the API_KEY environment variable.");
   }
-  return '';
+  return apiKey;
 };
 
 // 1. THE ROUTER (HSN Coordinator)
 // Analyzes the prompt and decides which agent should handle it.
 export const routeRequest = async (prompt: string): Promise<AgentType> => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API Key missing");
-
   const ai = new GoogleGenAI({ apiKey });
 
-  // Use Flash for fast routing
+  // Coordinator uses Google Search to clarify context if needed, as per spec.
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
     contents: prompt,
     config: {
-      systemInstruction: `
-        You are the Routing Logic for the Hospital System Navigator.
-        Analyze the user's input and categorize it into EXACTLY ONE of the following categories:
-        - MEDICAL_RECORDS (for medical history, test results, diagnosis files)
-        - BILLING (for invoices, insurance, costs)
-        - PATIENT_INFO (for registration, personal details, admin forms)
-        - SCHEDULING (for appointments, doctors availability)
-        - EDUCATION (for learning about conditions, videos, diagrams)
-        
-        If it is unclear, default to PATIENT_INFO.
-        Return ONLY the category name as a plain string. Do not add markdown or explanation.
-      `,
-      temperature: 0.1, // Low temperature for deterministic routing
+      tools: [{ googleSearch: {} }], 
+      systemInstruction: AGENTS[AgentType.COORDINATOR].systemInstruction,
+      temperature: 0.1, 
     }
   });
 
-  const text = response.text?.trim().toUpperCase();
+  const text = response.text?.trim().toUpperCase() || '';
 
-  // Validate output
-  if (Object.values(AgentType).includes(text as AgentType)) {
+  // Simple heuristic to extract the category if the model is chatty
+  // We look for the exact Enum keys
+  const keys = Object.values(AgentType);
+  for (const key of keys) {
+    if (text.includes(key) && key !== AgentType.COORDINATOR) {
+      return key;
+    }
+  }
+  
+  // If exact match fails, fallback or specific logic
+  // The system instruction says "Return ONLY the category name", so usually exact match works.
+  if (keys.includes(text as AgentType)) {
     return text as AgentType;
   }
   
-  // Fallback
+  // Default fallback
   return AgentType.PATIENT_INFO;
 };
 
@@ -58,22 +57,25 @@ export const runAgent = async (
   history: {role: string, parts: {text: string}[]}[]
 ) => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API Key missing");
-
   const ai = new GoogleGenAI({ apiKey });
   const agentConfig = AGENTS[agentType];
 
   let modelName = 'gemini-2.5-flash';
   const tools: any[] = [];
 
-  // Configure tools based on Agent Type
-  if (agentType === AgentType.BILLING || agentType === AgentType.SCHEDULING || agentType === AgentType.PATIENT_INFO) {
+  // Configure tools based on Agent Type requirements
+  if (
+    agentType === AgentType.BILLING || 
+    agentType === AgentType.SCHEDULING || 
+    agentType === AgentType.PATIENT_INFO ||
+    agentType === AgentType.EDUCATION // Education might need search for facts too
+  ) {
     tools.push({ googleSearch: {} });
   }
 
-  // Use a stronger model for complex medical/education reasoning if needed
-  if (agentType === AgentType.MEDICAL_RECORDS || agentType === AgentType.EDUCATION) {
-    modelName = 'gemini-2.5-flash'; // Keeping flash for speed, but could upgrade to pro
+  // Use Pro for complex medical records if preferred, keeping Flash for speed/cost balance in this demo
+  if (agentType === AgentType.MEDICAL_RECORDS) {
+    modelName = 'gemini-2.5-flash'; 
   }
 
   const response = await ai.models.generateContent({
@@ -97,33 +99,31 @@ export const runAgent = async (
 // 3. MEDIA GENERATION (Images)
 export const generateMedicalImage = async (prompt: string) => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API Key missing");
   const ai = new GoogleGenAI({ apiKey });
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: prompt,
-    config: {
-        // No specific config needed for basic generation, 1:1 default
-    }
-  });
-
-  // Extract image
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-          return `data:image/png;base64,${part.inlineData.data}`;
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: prompt,
+      config: {
+         // Default 1:1 aspect ratio
       }
+    });
+
+    // Extract image
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+        if (part.inlineData) {
+            return `data:image/png;base64,${part.inlineData.data}`;
+        }
+    }
+  } catch (e) {
+    console.error("Image generation error:", e);
   }
   return null;
 };
 
 // 4. VIDEO GENERATION (Veo)
-// Note: Requires Paid Key. We will wrap this carefully in the UI.
 export const generateMedicalVideo = async (prompt: string) => {
-   // Check for window.aistudio key injection or process.env
-   // For Veo, we typically need the user to select a key if not provided via env in a paid context.
-   // Assuming process.env.API_KEY is valid for Veo for this demo.
-   
    const apiKey = getApiKey();
    const ai = new GoogleGenAI({ apiKey });
 
@@ -151,7 +151,8 @@ export const generateMedicalVideo = async (prompt: string) => {
      }
    } catch (error) {
        console.error("Veo Generation Error:", error);
-       throw error;
+       // Throw to let the UI know, or return null to fail silently
+       return null;
    }
    return null;
 }
