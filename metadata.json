@@ -1,0 +1,5 @@
+{
+  "name": "Hospital System Navigator (HSN)",
+  "description": "An integrated AI agent system for hospital operations, featuring a central coordinator and specialized sub-agents for records, billing, patient info, scheduling, and education.",
+  "requestFramePermissions": []
+}
